@@ -459,7 +459,7 @@ async function callApi(token, request) {
 const TOOL_DEFINITION = {
   name: 'github_api',
   description:
-    'Call the GitHub REST API as the account connected in Settings → GitHub. Use it to inspect or change repositories, issues, releases and files (for example POST /user/repos to create a repository, or the git data endpoints to commit several files at once). Requires a connected account; when nothing is connected the call fails with github-not-connected and the user must connect in Settings → GitHub.',
+    'Call the GitHub REST API as the account connected in Settings → GitHub. Create repositories, manage issues and releases, and push files without Git CLI credentials. To push multiple files: read the target branch ref and its commit/tree; create blobs from exact file contents; create a tree based on the existing tree, then a commit with the branch head as parent; update the branch ref without force and verify it. For one file, use the contents API with its current SHA when updating. Respect repository permissions, preserve unrelated files, and do not force-push without explicit authorization. Requires a connected account. Plugin authentication does not automatically authenticate git push in a terminal.',
   parameters: {
     type: 'object',
     properties: {

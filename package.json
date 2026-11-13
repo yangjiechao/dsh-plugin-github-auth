@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-github-auth",
   "version": "0.1.0",
-  "description": "Connect a GitHub account to DeepSeek Harness with the OAuth device flow: a token stored on this machine, a Settings → GitHub page, and a github_api tool the assistant can use.",
+  "description": "Connect GitHub to DeepSeek Harness and let your agent create repositories and push files through the GitHub API, without separate Git CLI login.",
   "type": "module",
   "license": "MIT",
   "keywords": [

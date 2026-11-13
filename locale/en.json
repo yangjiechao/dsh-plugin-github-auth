@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "GitHub Connection",
-    "description": "Connect a GitHub account with the OAuth device flow and let the assistant call the GitHub API as you."
+    "description": "Connect GitHub so your assistant can create repositories and push files via the API, without a separate Git CLI login."
   }
 }
