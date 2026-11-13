@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "GitHub 连接",
+    "description": "用 OAuth 设备流连接 GitHub 账号，让助手以你的身份调用 GitHub API。"
+  }
+}
