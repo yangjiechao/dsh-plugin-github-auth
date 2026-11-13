@@ -18,7 +18,7 @@
  * The stored token is used by the `github_api` tool, so the agent can act on
  * the account the settings page connected.
  */
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -49,6 +49,7 @@ const PATHS = {
   status: '/dsh-github-auth/status',
   start: '/dsh-github-auth/device/start',
   poll: '/dsh-github-auth/device/poll',
+  cancel: '/dsh-github-auth/device/cancel',
   disconnect: '/dsh-github-auth/disconnect',
   clientId: '/dsh-github-auth/client-id',
 };
@@ -99,13 +100,18 @@ async function readState() {
  * Replace the stored state atomically and keep it private.
  * @param state - the whole new state object.
  */
-async function writeState(state) {
+async function writeState(state, permitted = () => true) {
   const file = stateFilePath();
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.tmp`;
   await writeFile(temporary, JSON.stringify(state, null, 2), { mode: 0o600 });
+  if (!permitted()) {
+    await unlink(temporary).catch(() => {});
+    return false;
+  }
   await rename(temporary, file);
   await chmod(file, 0o600).catch(() => {});
+  return true;
 }
 
 /**
@@ -113,14 +119,27 @@ async function writeState(state) {
  * @param patch - fields to overwrite; `undefined` values delete the field.
  * @returns the new state.
  */
-async function patchState(patch) {
-  const state = await readState();
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === undefined) delete state[key];
-    else state[key] = value;
-  }
-  await writeState(state);
-  return state;
+let stateWrites = Promise.resolve();
+
+async function patchState(patch, permitted = () => true) {
+  const operation = stateWrites.then(async () => {
+    if (!permitted()) return null;
+    const state = await readState();
+    if (!permitted()) return null;
+    const previous = { ...state };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete state[key];
+      else state[key] = value;
+    }
+    if (!(await writeState(state, permitted))) return null;
+    if (!permitted()) {
+      await writeState(previous);
+      return null;
+    }
+    return state;
+  });
+  stateWrites = operation.catch(() => {});
+  return operation;
 }
 
 /**
@@ -232,22 +251,110 @@ async function pollDeviceFlow(clientId, deviceCode) {
   const token = data.access_token;
   const viewer = await fetchViewer(token);
   if (viewer === null) throw new RequestError('token-unusable', 'GitHub accepted the token but /user refused it.', 502);
-  await patchState({
-    token,
-    tokenType: typeof data.token_type === 'string' ? data.token_type : 'bearer',
-    scopes: typeof data.scope === 'string' ? data.scope.split(',').map((scope) => scope.trim()).filter(Boolean) : [],
-    login: viewer.login,
-    avatarUrl: viewer.avatarUrl,
-    connectedAt: Date.now(),
-  });
-  return { status: 'authorized', login: viewer.login, avatarUrl: viewer.avatarUrl };
+  return {
+    status: 'authorized',
+    credential: {
+      token,
+      tokenType: typeof data.token_type === 'string' ? data.token_type : 'bearer',
+      scopes: typeof data.scope === 'string' ? data.scope.split(',').map((scope) => scope.trim()).filter(Boolean) : [],
+      login: viewer.login,
+      avatarUrl: viewer.avatarUrl,
+      connectedAt: Date.now(),
+    },
+  };
+}
+
+/* Device codes stay in memory on the host; only the user code is public.
+ * Timers do not depend on a settings page remaining mounted. */
+function createFlowManager() {
+  let generation = 0;
+  let current = null;
+  let timer = null;
+  let disposed = false;
+
+  const isCurrent = (flow) => !disposed && current === flow && flow.generation === generation;
+  const publicFlow = () => {
+    if (current === null) return null;
+    const { status, userCode, verificationUri, expiresAt, error } = current;
+    return { status, userCode, verificationUri, expiresAt, ...(error ? { error } : {}) };
+  };
+  const invalidate = () => {
+    generation += 1;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    current = null;
+  };
+  const schedule = (flow) => {
+    if (!isCurrent(flow)) return;
+    const remaining = flow.expiresAt - Date.now();
+    if (remaining <= 0) {
+      flow.status = 'expired';
+      return;
+    }
+    timer = setTimeout(() => { timer = null; void poll(flow); }, Math.min(flow.intervalMs, remaining));
+    timer.unref?.();
+  };
+  const poll = async (flow) => {
+    if (!isCurrent(flow)) return;
+    if (Date.now() >= flow.expiresAt) { flow.status = 'expired'; return; }
+    try {
+      const result = await pollDeviceFlow(flow.clientId, flow.deviceCode);
+      if (!isCurrent(flow)) return;
+      if (result.status === 'authorized') {
+        const stored = await patchState(result.credential, () => isCurrent(flow));
+        if (stored && isCurrent(flow)) current = null;
+      } else if (result.status === 'expired' || result.status === 'denied') {
+        flow.status = result.status;
+      } else {
+        if (result.status === 'slow-down') flow.intervalMs += 5000;
+        schedule(flow);
+      }
+    } catch (error) {
+      if (!isCurrent(flow)) return;
+      flow.status = 'error';
+      // Never expose server exceptions, upstream responses, tokens or device codes.
+      const allowed = ['device-flow-disabled', 'device-exchange-failed', 'token-unusable'];
+      flow.error = error instanceof RequestError && allowed.includes(error.code) ? error.code : 'network';
+    }
+  };
+  return {
+    publicFlow,
+    async start() {
+      invalidate();
+      const id = generation;
+      // Wait for any invalidated commit to roll back before starting another.
+      await stateWrites;
+      const resolved = resolveClientId(await readState());
+      if (resolved.clientId === '') throw new RequestError('client-id-missing', 'No OAuth App client id is configured.', 400);
+      const details = await startDeviceFlow(resolved.clientId);
+      if (disposed || generation !== id) throw new RequestError('flow-superseded', 'The authorization flow was cancelled or replaced.', 409);
+      const flow = {
+        generation: id,
+        status: 'pending',
+        clientId: resolved.clientId,
+        deviceCode: details.deviceCode,
+        userCode: details.userCode,
+        verificationUri: details.verificationUri,
+        expiresAt: Date.now() + Math.max(1, details.expiresIn) * 1000,
+        intervalMs: Math.max(5, details.interval) * 1000,
+      };
+      current = flow;
+      schedule(flow);
+      return publicFlow();
+    },
+    async cancel() {
+      invalidate();
+      await stateWrites;
+    },
+    dispose() { disposed = true; invalidate(); },
+  };
 }
 
 /**
  * The public status projection. Never includes the token.
  * @returns what the settings page renders.
  */
-async function statusReport() {
+async function statusReport(flowManager) {
   const state = await readState();
   const resolved = resolveClientId(state);
   const connected = typeof state.token === 'string' && state.token !== '';
@@ -261,6 +368,7 @@ async function statusReport() {
     scopes: connected && Array.isArray(state.scopes) ? state.scopes : [],
     connectedAt: connected && typeof state.connectedAt === 'number' ? state.connectedAt : null,
     statePath: stateFilePath(),
+    flow: flowManager.publicFlow(),
   };
 }
 
@@ -318,7 +426,7 @@ function makeEndpoint(webServer, handler) {
         send(response, error.status, { ok: false, error: error.code, message: error.message });
         return;
       }
-      send(response, 500, { ok: false, error: 'internal', message: String(error?.message ?? error) });
+      send(response, 500, { ok: false, error: 'internal', message: 'The request could not be completed.' });
     }
   };
 }
@@ -411,26 +519,19 @@ const TOOL_DEFINITION = {
  */
 export function apply(ctx) {
   ctx.effect(() => {
+    const flowManager = createFlowManager();
     const make = (path, handler) => ctx.webServer.register({ kind: 'exact', path, handler: makeEndpoint(ctx.webServer, handler) });
     const disposers = [
-      make(PATHS.status, statusReport),
-      make(PATHS.start, async () => {
-        const resolved = resolveClientId(await readState());
-        if (resolved.clientId === '') {
-          throw new RequestError('client-id-missing', 'No OAuth App client id is configured. Add one in Settings → GitHub.', 400);
-        }
-        const flow = await startDeviceFlow(resolved.clientId);
-        return { ...flow, clientIdSource: resolved.source };
-      }),
-      make(PATHS.poll, async (body) => {
-        const state = await readState();
-        const resolved = resolveClientId(state);
-        if (resolved.clientId === '') throw new RequestError('client-id-missing', 'No OAuth App client id is configured.', 400);
-        const deviceCode = typeof body.deviceCode === 'string' ? body.deviceCode : '';
-        if (deviceCode === '') throw new RequestError('bad-request', 'deviceCode is required.', 400);
-        return pollDeviceFlow(resolved.clientId, deviceCode);
+      make(PATHS.status, () => statusReport(flowManager)),
+      make(PATHS.start, async () => ({ flow: await flowManager.start() })),
+      // Retained as a read-only compatibility endpoint; it never exchanges codes.
+      make(PATHS.poll, async () => ({ flow: flowManager.publicFlow() })),
+      make(PATHS.cancel, async () => {
+        await flowManager.cancel();
+        return { flow: null };
       }),
       make(PATHS.disconnect, async () => {
+        await flowManager.cancel();
         await patchState({ token: undefined, login: undefined, avatarUrl: undefined, scopes: undefined, connectedAt: undefined });
         return { disconnected: true };
       }),
@@ -439,11 +540,13 @@ export function apply(ctx) {
         if (raw !== '' && !/^[A-Za-z0-9._-]{6,64}$/.test(raw)) {
           throw new RequestError('bad-client-id', 'A client id looks like "Iv1.0123456789abcdef".', 400);
         }
+        await flowManager.cancel();
         await patchState({ clientId: raw === '' ? undefined : raw });
-        return statusReport();
+        return statusReport(flowManager);
       }),
     ];
     return () => {
+      flowManager.dispose();
       for (const dispose of disposers) {
         if (typeof dispose === 'function') dispose();
       }

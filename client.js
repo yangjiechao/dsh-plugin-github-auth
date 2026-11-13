@@ -100,7 +100,7 @@ window.__ModuleLoader__.load({
     const ROUTES = {
       status: '/dsh-github-auth/status',
       start: '/dsh-github-auth/device/start',
-      poll: '/dsh-github-auth/device/poll',
+      cancelFlow: '/dsh-github-auth/device/cancel',
       disconnect: '/dsh-github-auth/disconnect',
       clientId: '/dsh-github-auth/client-id',
     };
@@ -117,7 +117,7 @@ window.__ModuleLoader__.load({
       .dshga-btn { border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); border-radius: 8px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
       .dshga-btn:hover { border-color: var(--dsw-alias-brand-primary); }
       .dshga-btn:disabled { opacity: .55; cursor: default; }
-      .dshga-btn-primary { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); color: #fff; font-weight: 600; }
+      .dshga-btn-primary { background: var(--dsw-alias-bg-layer-2); border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-label-primary); font-weight: 600; }
       .dshga-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 26px; letter-spacing: 3px; font-weight: 700; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); border: 1px dashed var(--dsw-alias-border-l2); border-radius: 10px; padding: 12px 16px; text-align: center; user-select: all; }
       .dshga-input { flex: 1; min-width: 200px; background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; color: var(--dsw-alias-label-primary); font-size: 13px; padding: 7px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
       .dshga-input:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
@@ -202,6 +202,14 @@ window.__ModuleLoader__.load({
           if (!alive.current) return null;
           if (data.ok) {
             setStatus(data);
+            if (data.flow?.status === 'pending') {
+              setFlow(data.flow);
+            } else {
+              setFlow(null);
+              if (data.flow?.status === 'expired' || data.flow?.status === 'denied') setError(describe(data.flow.status));
+              else if (data.flow?.status === 'error') setError(describe(data.flow.error, data.flow.message));
+              else if (data.connected) setError(null);
+            }
             if (typeof data.clientIdHint === 'string' && data.clientIdSource === 'settings') setDraft('');
           } else {
             setError(describe(data.error, data.message));
@@ -221,28 +229,9 @@ window.__ModuleLoader__.load({
 
         useEffect(() => {
           if (flow === null) return undefined;
-          const intervalMs = Math.max(flow.interval, 5) * 1000;
-          const timer = setInterval(async () => {
-            const data = await call(ROUTES.poll, { deviceCode: flow.deviceCode });
-            if (!alive.current) return;
-            if (!data.ok) {
-              setFlow(null);
-              setError(describe(data.error, data.message));
-              return;
-            }
-            if (data.status === 'authorized') {
-              setFlow(null);
-              setError(null);
-              await refresh();
-              return;
-            }
-            if (data.status === 'expired' || data.status === 'denied') {
-              setFlow(null);
-              setError(t(data.status === 'expired' ? 'errExpired' : 'errDenied'));
-            }
-          }, intervalMs);
+          const timer = setInterval(() => { void refresh(); }, 3000);
           return () => clearInterval(timer);
-        }, [flow, describe, refresh, t]);
+        }, [flow !== null, refresh]);
 
         const start = useCallback(async () => {
           setBusy(true);
@@ -254,13 +243,14 @@ window.__ModuleLoader__.load({
             setError(describe(data.error, data.message));
             return;
           }
-          setFlow({
-            deviceCode: data.deviceCode,
-            userCode: data.userCode,
-            verificationUri: data.verificationUri,
-            interval: data.interval,
-            expiresAt: Date.now() + data.expiresIn * 1000,
-          });
+          setFlow(data.flow);
+        }, [describe]);
+
+        const cancelFlow = useCallback(async () => {
+          const data = await call(ROUTES.cancelFlow);
+          if (!alive.current) return;
+          if (!data.ok) setError(describe(data.error, data.message));
+          else { setFlow(null); setError(null); }
         }, [describe]);
 
         const disconnect = useCallback(async () => {
@@ -339,7 +329,7 @@ window.__ModuleLoader__.load({
                   t('openDevice'),
                 ),
                 h('button', { className: 'dshga-btn', onClick: copyCode, type: 'button' }, copied ? t('copied') : t('copyCode')),
-                h('button', { className: 'dshga-btn', onClick: () => setFlow(null), type: 'button' }, t('cancel')),
+                h('button', { className: 'dshga-btn', onClick: cancelFlow, type: 'button' }, t('cancel')),
               ),
               h(
                 'div',
