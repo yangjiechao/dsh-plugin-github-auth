@@ -13,7 +13,7 @@ Requires DeepSeek Harness `0.2.x` (`engines.dsh: >=0.2.1-rc.3 <0.3.0`) with the 
 **From GitHub:**
 
 ```
-install_bundle  target: "github:<user>/dsh-plugin-github-auth"
+install_bundle  target: "github:yangjiechao/dsh-plugin-github-auth"
 ```
 
 **From a local checkout:**
