@@ -16,6 +16,10 @@
   "engines": {
     "dsh": ">=0.2.1-rc.3 <0.3.0"
   },
+  "scripts": {
+    "check": "node --check index.js && node --check client.js",
+    "test": "node --test test/*.test.mjs"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -29,6 +33,8 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
+    "COMPATIBILITY.md",
+    "test",
     "LICENSE"
   ],
   "dsh": {

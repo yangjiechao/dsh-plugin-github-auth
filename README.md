@@ -8,7 +8,7 @@ Connect a GitHub account to DeepSeek Harness the way headless tools do it: **OAu
 
 ## Install
 
-Requires DeepSeek Harness `0.2.x` (`engines.dsh: >=0.2.1-rc.3 <0.3.0`) with the Web GUI. No build step.
+Requires DeepSeek Harness `0.2.x` (`engines.dsh: >=0.2.1-rc.3 <0.3.0`) with the Web GUI. No build step. The 0.2.2-rc.3 source compatibility review does not raise the minimum; see [compatibility evidence and verification limits](./COMPATIBILITY.md).
 
 **From GitHub:**
 
